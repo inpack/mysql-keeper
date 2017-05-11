@@ -5,7 +5,7 @@
 skip-external-locking           = 1
 skip-name-resolve
 skip-host-cache
-open-files-limit                = 20000
+open-files-limit                = 10000
 
 ## Cache
 thread-cache-size               = 16
@@ -22,8 +22,8 @@ read-rnd-buffer-size            = 8M
 join-buffer-size                = 1M
 
 ## Temp Tables
-tmp-table-size                  = 32M
-max-heap-table-size             = 32M
+tmp-table-size                  = 16M
+max-heap-table-size             = 16M
 
 ## MyISAM
 key-buffer-size                 = {{.server_key_buffer_size}}
@@ -46,3 +46,5 @@ max-allowed-packet              = 16M
 interactive-timeout             = 600
 wait-timeout                    = 600
 
+## performance schema
+performance-schema              = 0

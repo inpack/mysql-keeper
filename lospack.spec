@@ -8,9 +8,12 @@ project.description = The world's most popular open source database
 %build
 PREFIX="{{.project__prefix}}"
 
-mkdir -p {{.buildroot}}/bin
+mkdir -p {{.buildroot}}/{bin,etc/my.cnf.d,data,lib64/mysql/plugin,files,run,log}
+
 go build -ldflags "-w -s" -o {{.buildroot}}/bin/keeper keeper.go
-cp -rp ./misc/etc {{.buildroot}}/
+
+install misc/etc/my.cnf.default {{.buildroot}}/etc/my.cnf.default
+install misc/etc/my.server.cnf.default {{.buildroot}}/etc/my.server.cnf.default
 
 cd deps/mysql-server
 cmake . -DWITH_BOOST=../boost_1_59_0 \
@@ -39,7 +42,6 @@ make mysqld -j3
 make mysqladmin -j3
 make connection_control -j3
 
-mkdir -p {{.buildroot}}/{bin,etc,data,lib64/mysql/plugin,files,run,log}
 
 strip -s sql/mysqld
 install sql/mysqld {{.buildroot}}/bin/mysql57d
@@ -53,6 +55,6 @@ install client/mysqladmin {{.buildroot}}/bin/mysql57admin
 strip -s plugin/connection_control/connection_control.so
 install plugin/connection_control/connection_control.so {{.buildroot}}/lib64/mysql/plugin/
 
-cp -rp sql/share {{.buildroot}}/
+rsync -av sql/share/* {{.buildroot}}/share/
 
 %files

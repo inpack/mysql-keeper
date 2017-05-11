@@ -35,22 +35,24 @@ import (
 )
 
 var (
-	pod_inst             = "/home/action/.los/pod_instance.json"
-	mysql_prefix         = "/home/action/apps/mysql57"
-	mysql_datadir        = mysql_prefix + "/data"
-	mysql_bin_mysql      = mysql_prefix + "/bin/mysql57"
-	mysql_bin_mysqld     = mysql_prefix + "/bin/mysql57d"
-	mysql_bin_mysqladmin = mysql_prefix + "/bin/mysql57admin"
-	mysql_pidfile        = mysql_prefix + "/run/mysql.pid"
-	mysql_sock           = mysql_prefix + "/run/mysql.sock"
-	mysql_conf_init      = mysql_prefix + "/etc/init_option.json"
-	mysql_conf_main      = mysql_prefix + "/etc/my.cnf"
-	mysql_conf_server    = mysql_prefix + "/etc/my.cnf.d/server.cnf"
-	pod_inst_updated     time.Time
-	mu                   sync.Mutex
-	cfg_mu               sync.Mutex
-	cfg_last             EnvConfig
-	cfg_next             EnvConfig
+	pod_inst              = "/home/action/.los/pod_instance.json"
+	mysql_prefix          = "/home/action/apps/mysql57"
+	mysql_datadir         = mysql_prefix + "/data"
+	mysql_bin_mysql       = mysql_prefix + "/bin/mysql57"
+	mysql_bin_mysqld      = mysql_prefix + "/bin/mysql57d"
+	mysql_bin_mysqladmin  = mysql_prefix + "/bin/mysql57admin"
+	mysql_pidfile         = mysql_prefix + "/run/mysql.pid"
+	mysql_sock            = mysql_prefix + "/run/mysql.sock"
+	mysql_conf_init       = mysql_prefix + "/etc/init_option.json"
+	mysql_conf_main       = mysql_prefix + "/etc/my.cnf"
+	mysql_conf_main_tpl   = mysql_prefix + "/etc/my.cnf.default"
+	mysql_conf_server     = mysql_prefix + "/etc/my.cnf.d/server.cnf"
+	mysql_conf_server_tpl = mysql_prefix + "/etc/my.server.cnf.default"
+	pod_inst_updated      time.Time
+	mu                    sync.Mutex
+	cfg_mu                sync.Mutex
+	cfg_last              EnvConfig
+	cfg_next              EnvConfig
 )
 
 type EnvConfig struct {
@@ -192,12 +194,16 @@ func do() {
 
 		if v, ok := option.Items.Get("db_auth"); ok {
 			cfg_next.RootAuth = v.String()
+		} else {
+			return
 		}
 
 		if v, ok := option.Items.Get("db_name"); ok {
 			cfg_next.Database = EnvConfigDatabase{
 				Name: v.String(),
 			}
+		} else {
+			return
 		}
 
 		if v, ok := option.Items.Get("db_user"); ok {
@@ -205,6 +211,8 @@ func do() {
 				Name: v.String(),
 				Auth: cfg_next.RootAuth,
 			})
+		} else {
+			return
 		}
 	}
 
@@ -313,21 +321,21 @@ func init_cnf() error {
 	sets := map[string]string{
 		"project_prefix":                 mysql_prefix,
 		"env_ram_size":                   fmt.Sprintf("%dM", ram),
-		"server_key_buffer_size":         fmt.Sprintf("%dM", ram/32),
+		"server_key_buffer_size":         fmt.Sprintf("%dM", ram/4),
 		"server_query_cache_size":        fmt.Sprintf("%dM", ram/8),
-		"server_innodb_buffer_pool_size": fmt.Sprintf("%dM", ram/2),
+		"server_innodb_buffer_pool_size": fmt.Sprintf("%dM", ram/4),
 	}
 
 	if !cfg_last.Inited || cfg_last.Resource.Ram != cfg_next.Resource.Ram {
 
-		if err := file_render(mysql_conf_server, mysql_conf_server+".default", sets); err != nil {
+		if err := file_render(mysql_conf_server, mysql_conf_server_tpl, sets); err != nil {
 			return err
 		}
 	}
 
 	if !cfg_last.Inited {
 
-		if err := file_render(mysql_conf_main, mysql_conf_main+".default", sets); err != nil {
+		if err := file_render(mysql_conf_main, mysql_conf_main_tpl, sets); err != nil {
 			return err
 		}
 
@@ -361,8 +369,11 @@ func init_datadir() error {
 		return err
 	}
 
-	_, err := exec.Command(mysql_bin_mysqld, "--initialize-insecure").Output()
-	fmt.Println("initialize-insecure server", err)
+	_, err := os.Open(mysql_datadir + "/auto.cnf")
+	if err != nil && os.IsNotExist(err) {
+		_, err = exec.Command(mysql_bin_mysqld, "--initialize-insecure").Output()
+		fmt.Println("initialize-insecure server", err)
+	}
 
 	if err == nil {
 		cfg_last.Inited = true
