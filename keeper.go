@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"code.hooto.com/lessos/loscore/losapi"
+	"github.com/lessos/lessgo/crypto/idhash"
 	"github.com/lessos/lessgo/encoding/json"
 	"github.com/lessos/lessgo/types"
 	"github.com/ziutek/mymysql/mysql"
@@ -192,12 +193,6 @@ func do() {
 			return
 		}
 
-		if v, ok := option.Items.Get("db_auth"); ok {
-			cfg_next.RootAuth = v.String()
-		} else {
-			return
-		}
-
 		if v, ok := option.Items.Get("db_name"); ok {
 			cfg_next.Database = EnvConfigDatabase{
 				Name: v.String(),
@@ -207,9 +202,15 @@ func do() {
 		}
 
 		if v, ok := option.Items.Get("db_user"); ok {
+
+			vp, ok := option.Items.Get("db_auth")
+			if !ok {
+				return
+			}
+
 			cfg_next.UserSync(EnvConfigUser{
 				Name: v.String(),
-				Auth: cfg_next.RootAuth,
+				Auth: vp.String(),
 			})
 		} else {
 			return
@@ -222,7 +223,7 @@ func do() {
 	}
 
 	//
-	if cfg_last.RootAuth == "" {
+	if cfg_last.Database.Name == "" {
 		json.DecodeFile(mysql_conf_init, &cfg_last)
 	}
 
@@ -457,24 +458,22 @@ func init_root_auth() error {
 		return errors.New("No Init")
 	}
 
-	if cfg_next.RootAuth == "" {
-		return errors.New("No Root Password Setup")
-	}
-
 	if cfg_last.RootAuth != "" {
 		return nil
 	}
 
+	root_auth := idhash.RandHexString(32)
+
 	_, err := exec.Command(mysql_bin_mysqladmin,
 		"-u", "root",
-		"password", cfg_next.RootAuth,
+		"password", root_auth,
 		"--socket="+mysql_sock,
 	).Output()
 
 	fmt.Println("init root password", err)
 
 	if err == nil {
-		cfg_last.RootAuth = cfg_next.RootAuth
+		cfg_last.RootAuth = root_auth
 		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
 	}
 
