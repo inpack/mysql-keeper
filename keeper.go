@@ -179,11 +179,11 @@ func do() {
 	{
 		for _, app := range inst.Apps {
 
-			if app.Spec.Meta.Name != "mysql57" {
+			if app.Spec.Meta.Name != "los-mysql" {
 				continue
 			}
 
-			option = app.Operate.Options.Get("cfg/mysql")
+			option = app.Operate.Options.Get("cfg/los-mysql")
 			if option != nil {
 				break
 			}
@@ -227,17 +227,21 @@ func do() {
 		json.DecodeFile(mysql_conf_init, &cfg_last)
 	}
 
+	//
 	if err := init_cnf(); err != nil {
+		fmt.Println(err)
 		return
 	}
 
-	//
+	// s1
 	if err := init_datadir(); err != nil {
+		fmt.Println(err)
 		return
 	}
 
 	if cfg_last.Resource.Ram != cfg_next.Resource.Ram {
 		if err := restart(); err != nil {
+			fmt.Println(err)
 			return
 		}
 		cfg_last.Resource.Ram = cfg_next.Resource.Ram
@@ -246,15 +250,18 @@ func do() {
 	} else {
 
 		if err := start(); err != nil {
+			fmt.Println(err)
 			return
 		}
 	}
 
+	// s2
 	if err := init_root_auth(); err != nil {
 		fmt.Println("init_root_auth", err)
 		return
 	}
 
+	// s3
 	if err := init_db(); err != nil {
 		fmt.Println("init_db", err)
 		return
@@ -356,10 +363,6 @@ func init_datadir() error {
 		return nil
 	}
 
-	if cfg_next.RootAuth == "" {
-		return errors.New("No Root Password Setup")
-	}
-
 	if cfg_last.RootAuth != "" {
 		return errors.New("Root Password Already Setup")
 	}
@@ -384,10 +387,17 @@ func init_datadir() error {
 	return err
 }
 
+func clean_runlock() {
+	os.Remove(mysql_sock)
+	os.Remove(mysql_pidfile)
+}
+
 func start() error {
 
 	mu.Lock()
 	defer mu.Unlock()
+
+	fmt.Println("start()")
 
 	if !cfg_last.Inited {
 		return errors.New("No Init")
@@ -397,9 +407,12 @@ func start() error {
 		return nil
 	}
 
+	clean_runlock()
 	// _, err := exec.Command(mysql_bin_mysqld, ">", "/dev/null", "2>&1", "&").Output()
 	_, err := exec.Command("/bin/sh", "-c", mysql_bin_mysqld+" > /dev/null 2>&1 &").Output()
+
 	time.Sleep(1e9)
+
 	fmt.Println("start mysqld", err)
 
 	return err
@@ -417,6 +430,7 @@ func restart() error {
 	var err error
 
 	if pid := pidof(); pid > 0 {
+		fmt.Println("kill HUP", pid)
 		_, err = exec.Command("kill", "-s", "HUP", strconv.Itoa(pid)).Output()
 		fmt.Println("kill HUP", err)
 
@@ -454,6 +468,8 @@ func init_root_auth() error {
 	mu.Lock()
 	defer mu.Unlock()
 
+	fmt.Println("init_root_auth()")
+
 	if !cfg_last.Inited {
 		return errors.New("No Init")
 	}
@@ -464,13 +480,63 @@ func init_root_auth() error {
 
 	root_auth := idhash.RandHexString(32)
 
-	_, err := exec.Command(mysql_bin_mysqladmin,
+	out, err := exec.Command(mysql_bin_mysqladmin,
 		"-u", "root",
 		"password", root_auth,
 		"--socket="+mysql_sock,
 	).Output()
 
-	fmt.Println("init root password", err)
+	if err != nil {
+		fmt.Println("init root pass err")
+		if pid := pidof(); pid > 0 {
+			fmt.Println("kill", pid)
+			exec.Command("kill", "-9", strconv.Itoa(pid)).Output()
+			clean_runlock()
+			fmt.Println("init root pass err, kill", pid)
+			time.Sleep(1e9)
+		}
+
+		// --skip-grant-tables --skip-networking
+		_, err = exec.Command("/bin/sh", "-c", mysql_bin_mysqld+" --skip-grant-tables > /dev/null 2>&1 &").Output()
+		time.Sleep(3e9)
+		if err == nil {
+
+			sql := strings.Join([]string{
+				`FLUSH PRIVILEGES;`,
+				fmt.Sprintf(`CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY "%s";`, root_auth),
+				fmt.Sprintf(`SET PASSWORD FOR 'root'@'localhost' = PASSWORD("%s");`, root_auth),
+				`GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;`,
+				`FLUSH PRIVILEGES;`,
+			}, " ")
+			fmt.Println("init root user", sql)
+
+			if err = conn_exec(sql); err != nil {
+				fmt.Println("init root pass err", err)
+			}
+		} else {
+			fmt.Println("init root pass err, start skip-grant-tables error", err)
+		}
+
+		if pid := pidof(); pid > 0 {
+			fmt.Println("init root pass err, kill and start", pid)
+			exec.Command("kill", "-9", strconv.Itoa(pid)).Output()
+			clean_runlock()
+			time.Sleep(3e9)
+		}
+
+		if err == nil {
+			fmt.Println("start ...")
+			if _, e := exec.Command("/bin/sh", "-c", mysql_bin_mysqld+" > /dev/null 2>&1 &").Output(); e != nil {
+				return e
+			}
+			fmt.Println("start ... ok")
+			time.Sleep(1e9)
+		}
+
+		fmt.Println("reset root pass", err)
+	}
+
+	fmt.Println("init root password", err, string(out))
 
 	if err == nil {
 		cfg_last.RootAuth = root_auth
@@ -494,18 +560,11 @@ func init_db() error {
 	if cfg_next.Database.Name != "" &&
 		cfg_last.Database.Name == "" {
 
-		_, err = exec.Command(mysql_bin_mysqladmin,
-			"create", cfg_next.Database.Name,
-			"--user=root",
-			"--password="+cfg_last.RootAuth,
-			"--socket="+mysql_sock,
-		).Output()
-
-		fmt.Println("create database", cfg_next.Database.Name, err)
-
-		if err != nil {
+		if err = conn_exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg_next.Database.Name)); err != nil {
 			return err
 		}
+
+		fmt.Println("create database", cfg_next.Database.Name, "ok")
 
 		cfg_last.Database = cfg_next.Database
 		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
