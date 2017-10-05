@@ -27,16 +27,17 @@ import (
 	"text/template"
 	"time"
 
-	"code.hooto.com/lessos/loscore/losapi"
+	"github.com/hooto/hlog4g/hlog"
 	"github.com/lessos/lessgo/crypto/idhash"
 	"github.com/lessos/lessgo/encoding/json"
 	"github.com/lessos/lessgo/types"
+	"github.com/sysinner/incore/inapi"
 	"github.com/ziutek/mymysql/mysql"
 	_ "github.com/ziutek/mymysql/native"
 )
 
 var (
-	pod_inst              = "/home/action/.los/pod_instance.json"
+	pod_inst              = "/home/action/.sysinner/pod_instance.json"
 	mysql_prefix          = "/home/action/apps/mysql57"
 	mysql_datadir         = mysql_prefix + "/data"
 	mysql_bin_mysql       = mysql_prefix + "/bin/mysql57"
@@ -129,7 +130,7 @@ func do() {
 
 	var (
 		tstart = time.Now()
-		inst   losapi.Pod
+		inst   inapi.Pod
 	)
 	cfg_next = EnvConfig{}
 
@@ -137,6 +138,7 @@ func do() {
 	{
 		fp, err := os.Open(pod_inst)
 		if err != nil {
+			hlog.Print("error", err.Error())
 			return
 		}
 		defer fp.Close()
@@ -153,10 +155,12 @@ func do() {
 		//
 		bs, err := ioutil.ReadAll(fp)
 		if err != nil {
+			hlog.Print("error", err.Error())
 			return
 		}
 
 		if err := json.Decode(bs, &inst); err != nil {
+			hlog.Print("error", err.Error())
 			return
 		}
 
@@ -175,15 +179,15 @@ func do() {
 	}
 
 	//
-	var option *losapi.AppOption
+	var option *inapi.AppOption
 	{
 		for _, app := range inst.Apps {
 
-			if app.Spec.Meta.Name != "los-mysql" {
+			if app.Spec.Meta.Name != "sysinner-mysql" {
 				continue
 			}
 
-			option = app.Operate.Options.Get("cfg/los-mysql")
+			option = app.Operate.Options.Get("cfg/sysinner-mysql")
 			if option != nil {
 				break
 			}
@@ -218,7 +222,7 @@ func do() {
 	}
 
 	//
-	if cfg_next.Resource.Ram < 128*losapi.ByteMB {
+	if cfg_next.Resource.Ram < 128*inapi.ByteMB {
 		return
 	}
 
@@ -325,7 +329,7 @@ func init_cnf() error {
 	}
 
 	//
-	ram := int(cfg_next.Resource.Ram / losapi.ByteMB)
+	ram := int(cfg_next.Resource.Ram / inapi.ByteMB)
 	sets := map[string]string{
 		"project_prefix":                 mysql_prefix,
 		"env_ram_size":                   fmt.Sprintf("%dM", ram),
