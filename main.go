@@ -202,6 +202,7 @@ func do() {
 				Name: v.String(),
 			}
 		} else {
+			hlog.Print("error", "No db_name Found")
 			return
 		}
 
@@ -209,6 +210,7 @@ func do() {
 
 			vp, ok := option.Items.Get("db_auth")
 			if !ok {
+				hlog.Print("error", "No db_auth Found")
 				return
 			}
 
@@ -216,13 +218,40 @@ func do() {
 				Name: v.String(),
 				Auth: vp.String(),
 			})
+
 		} else {
+			hlog.Print("error", "No db_user Found")
+			return
+		}
+
+		if v, ok := option.Items.Get("memory_usage_limit"); ok {
+
+			ram_pc := v.Int64()
+
+			if ram_pc < 30 || ram_pc > 100 {
+				hlog.Print("error", "Invalid memory_usage_limit Setup")
+				return
+			}
+
+			ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
+			if offset := ram_pc % (32 * inapi.ByteMB); offset > 0 {
+				ram_pc += offset
+			}
+			if ram_pc < 32*inapi.ByteMB {
+				ram_pc = 32 * inapi.ByteMB
+			}
+			if ram_pc < cfg_next.Resource.Ram {
+				cfg_next.Resource.Ram = ram_pc
+			}
+
+		} else {
+			hlog.Print("error", "No memory_usage_limit Found")
 			return
 		}
 	}
 
 	//
-	if cfg_next.Resource.Ram < 128*inapi.ByteMB {
+	if cfg_next.Resource.Ram < 32*inapi.ByteMB {
 		return
 	}
 
