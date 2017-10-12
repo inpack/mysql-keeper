@@ -124,6 +124,7 @@ func do() {
 
 	fpbin, err := os.Open(mysql_bin_mysqld)
 	if err != nil {
+		hlog.Print("error", err.Error())
 		return
 	}
 	fpbin.Close()
@@ -145,6 +146,7 @@ func do() {
 
 		st, err := fp.Stat()
 		if err != nil {
+			hlog.Print("error", err.Error())
 			return
 		}
 
@@ -167,6 +169,7 @@ func do() {
 		if inst.Spec == nil ||
 			len(inst.Spec.Boxes) == 0 ||
 			inst.Spec.Boxes[0].Resources == nil {
+			hlog.Print("error", "No Spec.Boxes Set")
 			return
 		}
 
@@ -183,10 +186,6 @@ func do() {
 	{
 		for _, app := range inst.Apps {
 
-			if app.Spec.Meta.Name != "sysinner-mysql" {
-				continue
-			}
-
 			option = app.Operate.Options.Get("cfg/sysinner-mysql")
 			if option != nil {
 				break
@@ -194,6 +193,7 @@ func do() {
 		}
 
 		if option == nil {
+			hlog.Print("error", "No AppSpec (sysinner-mysql) Found")
 			return
 		}
 
@@ -252,6 +252,7 @@ func do() {
 
 	//
 	if cfg_next.Resource.Ram < 32*inapi.ByteMB {
+		hlog.Print("error", "Not enough Memory to fit this MySQL Instance")
 		return
 	}
 
@@ -262,19 +263,19 @@ func do() {
 
 	//
 	if err := init_cnf(); err != nil {
-		fmt.Println(err)
+		hlog.Print("error", err.Error())
 		return
 	}
 
 	// s1
 	if err := init_datadir(); err != nil {
-		fmt.Println(err)
+		hlog.Print("error", err.Error())
 		return
 	}
 
 	if cfg_last.Resource.Ram != cfg_next.Resource.Ram {
 		if err := restart(); err != nil {
-			fmt.Println(err)
+			hlog.Print("error", err.Error())
 			return
 		}
 		cfg_last.Resource.Ram = cfg_next.Resource.Ram
@@ -283,31 +284,31 @@ func do() {
 	} else {
 
 		if err := start(); err != nil {
-			fmt.Println(err)
+			hlog.Print("error", err.Error())
 			return
 		}
 	}
 
 	// s2
 	if err := init_root_auth(); err != nil {
-		fmt.Println("init_root_auth", err)
+		hlog.Printf("error", "init_root_auth %s", err.Error())
 		return
 	}
 
 	// s3
 	if err := init_db(); err != nil {
-		fmt.Println("init_db", err)
+		hlog.Printf("error", "init_db %s", err.Error())
 		return
 	}
 
 	if err := init_user(); err != nil {
-		fmt.Println("init_user", err)
+		hlog.Printf("error", "init_user %s", err.Error())
 		return
 	}
 
 	pod_inst_updated = time.Now()
 
-	fmt.Println("time", time.Since(tstart))
+	hlog.Printf("info", "init done in %v", time.Since(tstart))
 }
 
 func file_render(dst_file, src_file string, sets map[string]string) error {
@@ -346,7 +347,7 @@ func file_render(dst_file, src_file string, sets map[string]string) error {
 
 	_, err = fpdst.Write(dst.Bytes())
 
-	fmt.Println("file_render", dst_file, src_file)
+	hlog.Printf("file_render %s to %s", src_file, dst_file)
 
 	return err
 }
@@ -409,7 +410,11 @@ func init_datadir() error {
 	_, err := os.Open(mysql_datadir + "/auto.cnf")
 	if err != nil && os.IsNotExist(err) {
 		_, err = exec.Command(mysql_bin_mysqld, "--initialize-insecure").Output()
-		fmt.Println("initialize-insecure server", err)
+		if err != nil {
+			hlog.Printf("error", "initialize-insecure server %s", err.Error())
+		} else {
+			hlog.Printf("info", "initialize-insecure server ok")
+		}
 	}
 
 	if err == nil {
@@ -430,7 +435,7 @@ func start() error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	fmt.Println("start()")
+	hlog.Printf("info", "start()")
 
 	if !cfg_last.Inited {
 		return errors.New("No Init")
@@ -446,7 +451,11 @@ func start() error {
 
 	time.Sleep(1e9)
 
-	fmt.Println("start mysqld", err)
+	if err != nil {
+		hlog.Printf("error", "start mysqld %s", err.Error())
+	} else {
+		hlog.Printf("info", "start mysqld ok")
+	}
 
 	return err
 }
@@ -463,15 +472,23 @@ func restart() error {
 	var err error
 
 	if pid := pidof(); pid > 0 {
-		fmt.Println("kill HUP", pid)
+		hlog.Printf("info", "kill HUP %d", pid)
 		_, err = exec.Command("kill", "-s", "HUP", strconv.Itoa(pid)).Output()
-		fmt.Println("kill HUP", err)
+		if err != nil {
+			hlog.Printf("error", "kill HUP %s", err.Error())
+		} else {
+			hlog.Printf("info", "kill HUP ok")
+		}
 
 	} else {
 		// _, err = exec.Command(mysql_bin_mysqld, ">", "/dev/null", "2>&1", "&").Output()
 		_, err := exec.Command("/bin/sh", "-c", mysql_bin_mysqld+" > /dev/null 2>&1 &").Output()
 		time.Sleep(1e9)
-		fmt.Println("start mysqld", err)
+		if err != nil {
+			hlog.Printf("error", "start mysqld %s", err.Error())
+		} else {
+			hlog.Printf("info", "start mysqld ok")
+		}
 	}
 
 	return err
@@ -501,7 +518,7 @@ func init_root_auth() error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	fmt.Println("init_root_auth()")
+	hlog.Printf("info", "init_root_auth()")
 
 	if !cfg_last.Inited {
 		return errors.New("No Init")
@@ -513,19 +530,18 @@ func init_root_auth() error {
 
 	root_auth := idhash.RandHexString(32)
 
-	out, err := exec.Command(mysql_bin_mysqladmin,
+	_, err := exec.Command(mysql_bin_mysqladmin,
 		"-u", "root",
 		"password", root_auth,
 		"--socket="+mysql_sock,
 	).Output()
 
 	if err != nil {
-		fmt.Println("init root pass err")
+		hlog.Printf("error", "init root pass err %s", err.Error())
 		if pid := pidof(); pid > 0 {
-			fmt.Println("kill", pid)
+			hlog.Printf("info", "kill %d", pid)
 			exec.Command("kill", "-9", strconv.Itoa(pid)).Output()
 			clean_runlock()
-			fmt.Println("init root pass err, kill", pid)
 			time.Sleep(1e9)
 		}
 
@@ -541,37 +557,34 @@ func init_root_auth() error {
 				`GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;`,
 				`FLUSH PRIVILEGES;`,
 			}, " ")
-			fmt.Println("init root user", sql)
+			hlog.Printf("info", "init root user")
 
 			if err = conn_exec(sql); err != nil {
-				fmt.Println("init root pass err", err)
+				hlog.Printf("error", "init root pass err %s", err.Error())
 			}
 		} else {
-			fmt.Println("init root pass err, start skip-grant-tables error", err)
+			hlog.Printf("error", "init root pass err, start skip-grant-tables error %s", err.Error())
 		}
 
 		if pid := pidof(); pid > 0 {
-			fmt.Println("init root pass err, kill and start", pid)
+			hlog.Printf("info", "init root pass err, kill and start %d", pid)
 			exec.Command("kill", "-9", strconv.Itoa(pid)).Output()
 			clean_runlock()
 			time.Sleep(3e9)
 		}
 
 		if err == nil {
-			fmt.Println("start ...")
+			hlog.Printf("info", "start ...")
 			if _, e := exec.Command("/bin/sh", "-c", mysql_bin_mysqld+" > /dev/null 2>&1 &").Output(); e != nil {
 				return e
 			}
-			fmt.Println("start ... ok")
+			hlog.Printf("info", "start ... ok")
 			time.Sleep(1e9)
 		}
-
-		fmt.Println("reset root pass", err)
 	}
 
-	fmt.Println("init root password", err, string(out))
-
 	if err == nil {
+		hlog.Printf("info", "init root password ok")
 		cfg_last.RootAuth = root_auth
 		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
 	}
@@ -597,7 +610,7 @@ func init_db() error {
 			return err
 		}
 
-		fmt.Println("create database", cfg_next.Database.Name, "ok")
+		hlog.Printf("info", "create database %s ok", cfg_next.Database.Name)
 
 		cfg_last.Database = cfg_next.Database
 		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
@@ -642,7 +655,7 @@ func init_user() error {
 				return err
 			}
 
-			fmt.Println("create user", v.Name)
+			hlog.Printf("info", "create user %s", v.Name)
 
 			cfg_last.UserSync(v)
 			err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
@@ -658,7 +671,7 @@ func conn_exec(sql string) error {
 
 	err := db.Connect()
 	if err != nil {
-		fmt.Println("conn err", err)
+		hlog.Printf("info", "conn err %s", err.Error())
 		return err
 	}
 
