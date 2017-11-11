@@ -1,6 +1,6 @@
 [project]
 name = sysinner-mysql
-version = 0.1.2-dev
+version = 0.2.0
 vendor = sysinner.com
 homepage = http://www.sysinner.com
 groups = dev/db
