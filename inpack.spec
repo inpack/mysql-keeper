@@ -1,10 +1,10 @@
 [project]
 name = sysinner-mysql
-version = 0.2.0
+version = 0.2.1
 vendor = sysinner.com
 homepage = http://www.sysinner.com
 groups = dev/db
-description = automated configuration management for mysql
+description = configuration management tool for mysql
 
 %build
 PREFIX="{{.project__prefix}}"

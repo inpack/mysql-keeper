@@ -45,6 +45,7 @@ var (
 	mysql_bin_mysqladmin  = mysql_prefix + "/bin/mysql57admin"
 	mysql_pidfile         = mysql_prefix + "/run/mysql.pid"
 	mysql_sock            = mysql_prefix + "/run/mysql.sock"
+	mysql_sock_lock       = mysql_prefix + "/run/mysql.sock.lock"
 	mysql_conf_init       = mysql_prefix + "/etc/init_option.json"
 	mysql_conf_main       = mysql_prefix + "/etc/my.cnf"
 	mysql_conf_main_tpl   = mysql_prefix + "/etc/my.cnf.default"
@@ -446,6 +447,10 @@ func start() error {
 	}
 
 	clean_runlock()
+
+	os.Remove(mysql_pidfile)
+	os.Remove(mysql_sock)
+	os.Remove(mysql_sock_lock)
 	// _, err := exec.Command(mysql_bin_mysqld, ">", "/dev/null", "2>&1", "&").Output()
 	_, err := exec.Command("/bin/sh", "-c", mysql_bin_mysqld+" > /dev/null 2>&1 &").Output()
 
