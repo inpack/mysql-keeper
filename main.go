@@ -51,6 +51,7 @@ var (
 	mysql_conf_main_tpl   = mysql_prefix + "/etc/my.cnf.default"
 	mysql_conf_server     = mysql_prefix + "/etc/my.cnf.d/server.cnf"
 	mysql_conf_server_tpl = mysql_prefix + "/etc/my.server.cnf.default"
+	mysql_mem_min         = 16 * inapi.ByteMB
 	pod_inst_updated      time.Time
 	mu                    sync.Mutex
 	cfg_mu                sync.Mutex
@@ -229,17 +230,17 @@ func do() {
 
 			ram_pc := v.Int64()
 
-			if ram_pc < 30 || ram_pc > 100 {
+			if ram_pc < 10 || ram_pc > 100 {
 				hlog.Print("error", "Invalid memory_usage_limit Setup")
 				return
 			}
 
 			ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
-			if offset := ram_pc % (32 * inapi.ByteMB); offset > 0 {
+			if offset := ram_pc % mysql_mem_min; offset > 0 {
 				ram_pc += offset
 			}
-			if ram_pc < 32*inapi.ByteMB {
-				ram_pc = 32 * inapi.ByteMB
+			if ram_pc < mysql_mem_min {
+				ram_pc = mysql_mem_min
 			}
 			if ram_pc < cfg_next.Resource.Ram {
 				cfg_next.Resource.Ram = ram_pc
@@ -252,7 +253,7 @@ func do() {
 	}
 
 	//
-	if cfg_next.Resource.Ram < 32*inapi.ByteMB {
+	if cfg_next.Resource.Ram < mysql_mem_min {
 		hlog.Print("error", "Not enough Memory to fit this MySQL Instance")
 		return
 	}
