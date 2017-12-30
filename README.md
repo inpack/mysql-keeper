@@ -1,11 +1,11 @@
-## lospack for MySQL
+## inPack for MySQL
 
 automated configuration management for mysql
 
 * Needs Go 1.8+ (https://golang.org)
 
 ``` shell
-go install code.hooto.com/lessos/lospack/cmd/lospack
+go install github.com/sysinner/inpack/cmd/inpack
 
-lospack build .
+inpack build
 ```
