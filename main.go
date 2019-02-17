@@ -15,29 +15,26 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/hooto/hlog4g/hlog"
 	"github.com/lessos/lessgo/crypto/idhash"
 	"github.com/lessos/lessgo/encoding/json"
 	"github.com/lessos/lessgo/types"
-	"github.com/sysinner/incore/inapi"
+	"github.com/sysinner/incore/inconf"
+	"github.com/sysinner/incore/inutils/filerender"
 	"github.com/ziutek/mymysql/mysql"
 	_ "github.com/ziutek/mymysql/native"
 )
 
 var (
-	pod_inst              = "/home/action/.sysinner/pod_instance.json"
 	mysql_prefix          = "/home/action/apps/mysql57"
 	mysql_datadir         = mysql_prefix + "/data"
 	mysql_bin_mysql       = mysql_prefix + "/bin/mysql57"
@@ -51,12 +48,12 @@ var (
 	mysql_conf_main_tpl   = mysql_prefix + "/etc/my.cnf.default"
 	mysql_conf_server     = mysql_prefix + "/etc/my.cnf.d/server.cnf"
 	mysql_conf_server_tpl = mysql_prefix + "/etc/my.server.cnf.default"
-	mysql_mem_min         = 16 * inapi.ByteMB
-	pod_inst_updated      time.Time
+	mysql_mem_min         = int32(16) // in MiB
 	mu                    sync.Mutex
 	cfg_mu                sync.Mutex
 	cfg_last              EnvConfig
 	cfg_next              EnvConfig
+	myPodCfr              *inconf.PodConfigurator
 )
 
 type EnvConfig struct {
@@ -69,8 +66,8 @@ type EnvConfig struct {
 }
 
 type EnvConfigResource struct {
-	Ram int64 `json:"ram"`
-	Cpu int64 `json:"cpu"`
+	Ram int32 `json:"ram"`
+	Cpu int32 `json:"cpu"`
 }
 
 type EnvConfigDatabase struct {
@@ -133,122 +130,95 @@ func do() {
 
 	var (
 		tstart = time.Now()
-		inst   inapi.Pod
+		podCfr *inconf.PodConfigurator
+		appCfg *inconf.AppConfigGroup
 	)
 	cfg_next = EnvConfig{}
 
 	//
 	{
-		fp, err := os.Open(pod_inst)
-		if err != nil {
-			hlog.Print("error", err.Error())
-			return
-		}
-		defer fp.Close()
+		if myPodCfr != nil {
+			podCfr = myPodCfr
 
-		st, err := fp.Stat()
-		if err != nil {
-			hlog.Print("error", err.Error())
-			return
-		}
+			if !podCfr.Update() {
+				return
+			}
 
-		if !st.ModTime().After(pod_inst_updated) {
-			return
-		}
+		} else {
 
-		//
-		bs, err := ioutil.ReadAll(fp)
-		if err != nil {
-			hlog.Print("error", err.Error())
-			return
-		}
-
-		if err := json.Decode(bs, &inst); err != nil {
-			hlog.Print("error", err.Error())
-			return
-		}
-
-		if inst.Spec == nil ||
-			inst.Spec.Box.Resources == nil {
-			hlog.Print("error", "No Spec.Box Set")
-			return
-		}
-
-		if inst.Spec.Box.Resources.MemLimit > 0 {
-			cfg_next.Resource.Ram = inst.Spec.Box.Resources.MemLimit
-		}
-		if inst.Spec.Box.Resources.CpuLimit > 0 {
-			cfg_next.Resource.Cpu = inst.Spec.Box.Resources.CpuLimit
-		}
-	}
-
-	//
-	var option *inapi.AppOption
-	{
-		for _, app := range inst.Apps {
-
-			option = app.Operate.Options.Get("cfg/sysinner-mysql")
-			if option != nil {
-				break
+			if podCfr, err = inconf.NewPodConfigurator(); err != nil {
+				hlog.Print("error", err.Error())
+				return
 			}
 		}
 
-		if option == nil {
+		appCfr := podCfr.AppConfigurator("sysinner-mysql-*")
+		if appCfr == nil {
 			hlog.Print("error", "No AppSpec (sysinner-mysql) Found")
 			return
 		}
-
-		if v, ok := option.Items.Get("db_name"); ok {
-			cfg_next.Database = EnvConfigDatabase{
-				Name: v.String(),
-			}
-		} else {
-			hlog.Print("error", "No db_name Found")
+		if appCfg = appCfr.AppConfigQuery("cfg/sysinner-mysql"); appCfg == nil {
+			hlog.Print("error", "No App Config (sysinner-mysql) Found")
 			return
 		}
 
-		if v, ok := option.Items.Get("db_user"); ok {
+		if podCfr.PodSpec().Box.Resources.MemLimit > 0 {
+			cfg_next.Resource.Ram = podCfr.PodSpec().Box.Resources.MemLimit
+		}
+		if podCfr.PodSpec().Box.Resources.CpuLimit > 0 {
+			cfg_next.Resource.Cpu = podCfr.PodSpec().Box.Resources.CpuLimit
+		}
+	}
 
-			vp, ok := option.Items.Get("db_auth")
-			if !ok {
-				hlog.Print("error", "No db_auth Found")
-				return
-			}
+	if v, ok := appCfg.ValueOK("db_name"); ok {
+		cfg_next.Database = EnvConfigDatabase{
+			Name: v.String(),
+		}
+	} else {
+		hlog.Print("error", "No db_name Found")
+		return
+	}
 
-			cfg_next.UserSync(EnvConfigUser{
-				Name: v.String(),
-				Auth: vp.String(),
-			})
+	if v, ok := appCfg.ValueOK("db_user"); ok {
 
-		} else {
-			hlog.Print("error", "No db_user Found")
+		vp, ok := appCfg.ValueOK("db_auth")
+		if !ok {
+			hlog.Print("error", "No db_auth Found")
 			return
 		}
 
-		if v, ok := option.Items.Get("memory_usage_limit"); ok {
+		cfg_next.UserSync(EnvConfigUser{
+			Name: v.String(),
+			Auth: vp.String(),
+		})
 
-			ram_pc := v.Int64()
+	} else {
+		hlog.Print("error", "No db_user Found")
+		return
+	}
 
-			if ram_pc < 10 || ram_pc > 100 {
-				hlog.Print("error", "Invalid memory_usage_limit Setup")
-				return
-			}
+	if v, ok := appCfg.ValueOK("memory_usage_limit"); ok {
 
-			ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
-			if offset := ram_pc % mysql_mem_min; offset > 0 {
-				ram_pc += offset
-			}
-			if ram_pc < mysql_mem_min {
-				ram_pc = mysql_mem_min
-			}
-			if ram_pc < cfg_next.Resource.Ram {
-				cfg_next.Resource.Ram = ram_pc
-			}
+		ram_pc := v.Int32()
 
-		} else {
-			hlog.Print("error", "No memory_usage_limit Found")
-			return
+		if ram_pc < 10 {
+			ram_pc = 10
+		} else if ram_pc > 100 {
+			ram_pc = 100
 		}
+
+		ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
+		if offset := ram_pc % mysql_mem_min; offset > 0 {
+			ram_pc -= offset
+		}
+		if ram_pc < mysql_mem_min {
+			ram_pc = mysql_mem_min
+		}
+		cfg_next.Resource.Ram = ram_pc
+
+	} else {
+		hlog.Print("error", "No memory_usage_limit Found")
+		return
 	}
 
 	//
@@ -307,50 +277,9 @@ func do() {
 		return
 	}
 
-	pod_inst_updated = time.Now()
+	hlog.Printf("info", "setup in %v", time.Since(tstart))
 
-	hlog.Printf("info", "init done in %v", time.Since(tstart))
-}
-
-func file_render(dst_file, src_file string, sets map[string]string) error {
-
-	fpsrc, err := os.Open(src_file)
-	if err != nil {
-		return err
-	}
-	defer fpsrc.Close()
-
-	//
-	src, err := ioutil.ReadAll(fpsrc)
-	if err != nil {
-		return err
-	}
-
-	//
-	tpl, err := template.New("s").Parse(string(src))
-	if err != nil {
-		return err
-	}
-
-	var dst bytes.Buffer
-	if err := tpl.Execute(&dst, sets); err != nil {
-		return err
-	}
-
-	fpdst, err := os.OpenFile(dst_file, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return err
-	}
-	defer fpdst.Close()
-
-	fpdst.Seek(0, 0)
-	fpdst.Truncate(0)
-
-	_, err = fpdst.Write(dst.Bytes())
-
-	hlog.Printf("file_render %s to %s", src_file, dst_file)
-
-	return err
+	myPodCfr = podCfr
 }
 
 func init_cnf() error {
@@ -360,8 +289,8 @@ func init_cnf() error {
 	}
 
 	//
-	ram := int(cfg_next.Resource.Ram / inapi.ByteMB)
-	sets := map[string]string{
+	ram := int(cfg_next.Resource.Ram)
+	sets := map[string]interface{}{
 		"project_prefix":                 mysql_prefix,
 		"env_ram_size":                   fmt.Sprintf("%dM", ram),
 		"server_key_buffer_size":         fmt.Sprintf("%dM", ram/4),
@@ -371,14 +300,14 @@ func init_cnf() error {
 
 	if !cfg_last.Inited || cfg_last.Resource.Ram != cfg_next.Resource.Ram {
 
-		if err := file_render(mysql_conf_server, mysql_conf_server_tpl, sets); err != nil {
+		if err := filerender.Render(mysql_conf_server_tpl, mysql_conf_server, 0644, sets); err != nil {
 			return err
 		}
 	}
 
 	if !cfg_last.Inited {
 
-		if err := file_render(mysql_conf_main, mysql_conf_main_tpl, sets); err != nil {
+		if err := filerender.Render(mysql_conf_main_tpl, mysql_conf_main, 0644, sets); err != nil {
 			return err
 		}
 

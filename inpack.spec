@@ -1,6 +1,6 @@
 [project]
-name = sysinner-mysql
-version = 0.2.3
+name = mysql-keeper
+version = 0.9.0
 vendor = sysinner.com
 homepage = http://www.sysinner.com
 groups = dev/db
@@ -11,7 +11,7 @@ PREFIX="{{.project__prefix}}"
 
 mkdir -p {{.buildroot}}/{bin,log}
 
-go build -ldflags "-w -s" -o {{.buildroot}}/bin/sysinner-mysql main.go
+go build -ldflags "-w -s" -o {{.buildroot}}/bin/mysql-keeper main.go
 
 
 %files
