@@ -35,7 +35,7 @@ import (
 )
 
 var (
-	mysql_prefix          = "/home/action/apps/mysql57"
+	mysql_prefix          = "/opt/mysql/mysql57"
 	mysql_datadir         = mysql_prefix + "/data"
 	mysql_bin_mysql       = mysql_prefix + "/bin/mysql57"
 	mysql_bin_mysqld      = mysql_prefix + "/bin/mysql57d"
