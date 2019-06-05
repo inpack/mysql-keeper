@@ -9,10 +9,10 @@
 			"revisionTime": "2017-03-07T00:15:33Z"
 		},
 		{
-			"checksumSHA1": "0uvoFFw5De90Waj6vAt7pVSBo2o=",
+			"checksumSHA1": "5c0Zz+7Lm1zGUB6s1K44bGc2F50=",
 			"path": "github.com/lessos/lessgo/crypto/idhash",
-			"revision": "09c0da7c9f7bc3c74add70db064cb22a2f9effc2",
-			"revisionTime": "2017-03-22T12:25:20Z"
+			"revision": "af68c18e77ac5ad08894139de7dcade033440337",
+			"revisionTime": "2019-05-25T13:28:03Z"
 		},
 		{
 			"checksumSHA1": "6FptCzVZOb3dQe9E0a59wbUJiks=",
@@ -165,5 +165,5 @@
 			"revisionTime": "2017-03-14T22:44:13Z"
 		}
 	],
-	"rootPath": "code.hooto.com/lospack/mysql"
+	"rootPath": "code.hooto.com/inpack/mysql-keeper"
 }

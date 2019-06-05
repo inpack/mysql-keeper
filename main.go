@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,7 @@ import (
 
 var (
 	mysql_prefix          = "/opt/mysql/mysql57"
+	mysql_keeper_prefix   = "/opt/mysql/keeper"
 	mysql_datadir         = mysql_prefix + "/data"
 	mysql_bin_mysql       = mysql_prefix + "/bin/mysql57"
 	mysql_bin_mysqld      = mysql_prefix + "/bin/mysql57d"
@@ -43,11 +45,15 @@ var (
 	mysql_pidfile         = mysql_prefix + "/run/mysql.pid"
 	mysql_sock            = mysql_prefix + "/run/mysql.sock"
 	mysql_sock_lock       = mysql_prefix + "/run/mysql.sock.lock"
-	mysql_conf_init       = mysql_prefix + "/etc/init_option.json"
-	mysql_conf_main       = mysql_prefix + "/etc/my.cnf"
-	mysql_conf_main_tpl   = mysql_prefix + "/etc/my.cnf.default"
-	mysql_conf_server     = mysql_prefix + "/etc/my.cnf.d/server.cnf"
-	mysql_conf_server_tpl = mysql_prefix + "/etc/my.server.cnf.default"
+	mysql_cnf_init        = mysql_prefix + "/etc/init_option.json"
+	mysql_cnf_main        = mysql_prefix + "/etc/my.cnf"
+	mysql_cnf_main_tpl    = mysql_keeper_prefix + "/misc/etc/my.cnf.default"
+	mysql_cnf_server      = mysql_prefix + "/etc/my.cnf.d/server.cnf"
+	mysql_cnf_server_tpl  = mysql_keeper_prefix + "/misc/etc/my.server.cnf.default"
+	mysql_ssl_bin         = mysql_prefix + "/bin/mysql_ssl_rsa_setup"
+	mysql_ssl_server_cert = mysql_datadir + "/server-cert.pem"
+	mysql_gr_server       = mysql_prefix + "/etc/my.cnf.d/server.gr.cnf"
+	mysql_gr_server_tpl   = mysql_keeper_prefix + "/misc/5.7/server.gr.cnf.default"
 	mysql_mem_min         = int32(16) // in MiB
 	mu                    sync.Mutex
 	cfg_mu                sync.Mutex
@@ -57,12 +63,15 @@ var (
 )
 
 type EnvConfig struct {
-	Inited   bool              `json:"inited"`
-	RootAuth string            `json:"root_auth"`
-	Resource EnvConfigResource `json:"resource"`
-	Database EnvConfigDatabase `json:"database"`
-	Users    []EnvConfigUser   `json:"users"`
-	Updated  time.Time         `json:"updated"`
+	Inited    bool                   `json:"inited"`
+	RootAuth  string                 `json:"root_auth"`
+	Resource  EnvConfigResource      `json:"resource"`
+	Database  EnvConfigDatabase      `json:"database"`
+	Users     []EnvConfigUser        `json:"users"`
+	Updated   time.Time              `json:"updated"`
+	Gr        ConfigGroupReplication `json:"gr"`
+	GrInited  bool                   `json:"-"`
+	GrStarted bool                   `json:"-"`
 }
 
 type EnvConfigResource struct {
@@ -78,6 +87,20 @@ type EnvConfigDatabase struct {
 type EnvConfigUser struct {
 	Name string `json:"name"`
 	Auth string `json:"auth"`
+}
+
+type ConfigGroupReplication struct {
+	Enable       bool   `json:"enable"`
+	MultiPrimary bool   `json:"multi_primary"`
+	ServerId     int    `json:"server_id"`
+	Port         int    `json:"port"`
+	GroupName    string `json:"group_name"`
+	GroupSeeds   string `json:"group_seeds"`
+	BindAddress  string `json:"bind_address"`
+	ReportHost   string `json:"report_host"`
+	IpWhitelist  string `json:"ip_whitelist"`
+	LocalAddress string `json:"local_address"`
+	Auth         string `json:"auth"`
 }
 
 func (cfg *EnvConfig) UserSync(item EnvConfigUser) {
@@ -121,17 +144,16 @@ func main() {
 
 func do() {
 
-	fpbin, err := os.Open(mysql_bin_mysqld)
-	if err != nil {
-		hlog.Print("error", err.Error())
+	if !fileExist(mysql_bin_mysqld) {
+		hlog.Print("error", mysql_bin_mysqld+" not found")
 		return
 	}
-	fpbin.Close()
 
 	var (
 		tstart = time.Now()
 		podCfr *inconf.PodConfigurator
-		appCfg *inconf.AppConfigGroup
+		appCfr *inconf.AppConfigurator
+		err    error
 	)
 	cfg_next = EnvConfig{}
 
@@ -150,91 +172,30 @@ func do() {
 				hlog.Print("error", err.Error())
 				return
 			}
+
+			myPodCfr = podCfr
 		}
 
-		appCfr := podCfr.AppConfigurator("sysinner-mysql-*")
+		appCfr = podCfr.AppConfigurator("sysinner-mysql-*")
 		if appCfr == nil {
 			hlog.Print("error", "No AppSpec (sysinner-mysql) Found")
 			return
 		}
-		if appCfg = appCfr.AppConfigQuery("cfg/sysinner-mysql"); appCfg == nil {
-			hlog.Print("error", "No App Config (sysinner-mysql) Found")
-			return
-		}
-
-		if podCfr.PodSpec().Box.Resources.MemLimit > 0 {
-			cfg_next.Resource.Ram = podCfr.PodSpec().Box.Resources.MemLimit
-		}
-		if podCfr.PodSpec().Box.Resources.CpuLimit > 0 {
-			cfg_next.Resource.Cpu = podCfr.PodSpec().Box.Resources.CpuLimit
-		}
-	}
-
-	if v, ok := appCfg.ValueOK("db_name"); ok {
-		cfg_next.Database = EnvConfigDatabase{
-			Name: v.String(),
-		}
-	} else {
-		hlog.Print("error", "No db_name Found")
-		return
-	}
-
-	if v, ok := appCfg.ValueOK("db_user"); ok {
-
-		vp, ok := appCfg.ValueOK("db_auth")
-		if !ok {
-			hlog.Print("error", "No db_auth Found")
-			return
-		}
-
-		cfg_next.UserSync(EnvConfigUser{
-			Name: v.String(),
-			Auth: vp.String(),
-		})
-
-	} else {
-		hlog.Print("error", "No db_user Found")
-		return
-	}
-
-	if v, ok := appCfg.ValueOK("memory_usage_limit"); ok {
-
-		ram_pc := v.Int32()
-
-		if ram_pc < 10 {
-			ram_pc = 10
-		} else if ram_pc > 100 {
-			ram_pc = 100
-		}
-
-		ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
-		if offset := ram_pc % mysql_mem_min; offset > 0 {
-			ram_pc -= offset
-		}
-		if ram_pc < mysql_mem_min {
-			ram_pc = mysql_mem_min
-		}
-		cfg_next.Resource.Ram = ram_pc
-
-	} else {
-		hlog.Print("error", "No memory_usage_limit Found")
-		return
-	}
-
-	//
-	if cfg_next.Resource.Ram < mysql_mem_min {
-		hlog.Print("error", "Not enough Memory to fit this MySQL Instance")
-		return
 	}
 
 	//
 	if cfg_last.Database.Name == "" {
-		json.DecodeFile(mysql_conf_init, &cfg_last)
+		json.DecodeFile(mysql_cnf_init, &cfg_last)
 	}
 
 	//
-	if err := init_cnf(); err != nil {
+	if err := setupConf(podCfr, appCfr); err != nil {
 		hlog.Print("error", err.Error())
+		return
+	}
+
+	if err := setupGrConf(podCfr, appCfr); err != nil {
+		hlog.Printf("error", "setup gr err %s", err.Error())
 		return
 	}
 
@@ -244,13 +205,20 @@ func do() {
 		return
 	}
 
-	if cfg_last.Resource.Ram != cfg_next.Resource.Ram {
+	if err := setupSsl(); err != nil {
+		hlog.Print("error", err.Error())
+		return
+	}
+
+	if !reflect.DeepEqual(cfg_last.Resource, cfg_next.Resource) ||
+		!reflect.DeepEqual(cfg_last.Gr, cfg_next.Gr) {
+
 		if err := restart(); err != nil {
 			hlog.Print("error", err.Error())
 			return
 		}
-		cfg_last.Resource.Ram = cfg_next.Resource.Ram
-		cfg_last.Resource.Cpu = cfg_next.Resource.Cpu
+
+		hlog.Printf("info", "refresh configs")
 
 	} else {
 
@@ -277,14 +245,87 @@ func do() {
 		return
 	}
 
+	if err := setupGrOpr(podCfr, appCfr); err != nil {
+		hlog.Printf("error", "setup gr err %s", err.Error())
+		return
+	}
+
+	cfg_last.Resource = cfg_next.Resource
+	cfg_last.Gr = cfg_next.Gr
+	confFlush()
+
 	hlog.Printf("info", "setup in %v", time.Since(tstart))
 
 	myPodCfr = podCfr
 }
 
-func init_cnf() error {
+func setupConf(podCfr *inconf.PodConfigurator, appCfr *inconf.AppConfigurator) error {
 
-	if cfg_last.Inited && cfg_last.Resource.Ram == cfg_next.Resource.Ram {
+	appCfg := appCfr.AppConfigQuery("cfg/sysinner-mysql")
+	if appCfg == nil {
+		return errors.New("No App Config (sysinner-mysql) Found")
+	}
+
+	if podCfr.PodSpec().Box.Resources.MemLimit > 0 {
+		cfg_next.Resource.Ram = podCfr.PodSpec().Box.Resources.MemLimit
+	}
+	if podCfr.PodSpec().Box.Resources.CpuLimit > 0 {
+		cfg_next.Resource.Cpu = podCfr.PodSpec().Box.Resources.CpuLimit
+	}
+
+	if v, ok := appCfg.ValueOK("db_name"); ok {
+		cfg_next.Database = EnvConfigDatabase{
+			Name: v.String(),
+		}
+	} else {
+		return errors.New("No db_name Found")
+	}
+
+	if v, ok := appCfg.ValueOK("db_user"); ok {
+
+		vp, ok := appCfg.ValueOK("db_auth")
+		if !ok {
+			return errors.New("No db_auth Found")
+		}
+
+		cfg_next.UserSync(EnvConfigUser{
+			Name: v.String(),
+			Auth: vp.String(),
+		})
+
+	} else {
+		return errors.New("No db_user Found")
+	}
+
+	if v, ok := appCfg.ValueOK("memory_usage_limit"); ok {
+
+		ram_pc := v.Int32()
+
+		if ram_pc < 10 {
+			ram_pc = 10
+		} else if ram_pc > 100 {
+			ram_pc = 100
+		}
+
+		ram_pc = (cfg_next.Resource.Ram * ram_pc) / 100
+		if offset := ram_pc % mysql_mem_min; offset > 0 {
+			ram_pc -= offset
+		}
+		if ram_pc < mysql_mem_min {
+			ram_pc = mysql_mem_min
+		}
+		cfg_next.Resource.Ram = ram_pc
+
+	} else {
+		return errors.New("No memory_usage_limit Found")
+	}
+
+	//
+	if cfg_next.Resource.Ram < mysql_mem_min {
+		return errors.New("Not enough Memory to fit this MySQL Instance")
+	}
+
+	if cfg_last.Inited && reflect.DeepEqual(cfg_last.Resource, cfg_next.Resource) {
 		return nil
 	}
 
@@ -298,24 +339,29 @@ func init_cnf() error {
 		"server_innodb_buffer_pool_size": fmt.Sprintf("%dM", ram/4),
 	}
 
-	if !cfg_last.Inited || cfg_last.Resource.Ram != cfg_next.Resource.Ram {
+	if !cfg_last.Inited || !reflect.DeepEqual(cfg_last.Resource, cfg_next.Resource) {
 
-		if err := filerender.Render(mysql_conf_server_tpl, mysql_conf_server, 0644, sets); err != nil {
+		if err := filerender.Render(mysql_cnf_server_tpl, mysql_cnf_server, 0644, sets); err != nil {
 			return err
 		}
 	}
 
 	if !cfg_last.Inited {
 
-		if err := filerender.Render(mysql_conf_main_tpl, mysql_conf_main, 0644, sets); err != nil {
+		if err := filerender.Render(mysql_cnf_main_tpl, mysql_cnf_main, 0644, sets); err != nil {
 			return err
 		}
-
-		cfg_last.Resource.Ram = cfg_next.Resource.Ram
-		cfg_last.Resource.Cpu = cfg_next.Resource.Cpu
 	}
 
 	return nil
+}
+
+func fileExist(v string) bool {
+	_, err := os.Stat(v)
+	if err != nil && os.IsNotExist(err) {
+		return false
+	}
+	return true
 }
 
 func init_datadir() error {
@@ -331,14 +377,15 @@ func init_datadir() error {
 		return errors.New("Root Password Already Setup")
 	}
 
+	var err error
+
 	// writeable test!
 	cfg_last.Updated = time.Now()
-	if err := json.EncodeToFile(cfg_last, mysql_conf_init, "  "); err != nil {
+	if err := confFlush(); err != nil {
 		return err
 	}
 
-	_, err := os.Open(mysql_datadir + "/auto.cnf")
-	if err != nil && os.IsNotExist(err) {
+	if !fileExist(mysql_datadir + "/auto.cnf") {
 		_, err = exec.Command(mysql_bin_mysqld, "--initialize-insecure").Output()
 		if err != nil {
 			hlog.Printf("error", "initialize-insecure server %s", err.Error())
@@ -349,10 +396,233 @@ func init_datadir() error {
 
 	if err == nil {
 		cfg_last.Inited = true
-		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
+		err = confFlush()
 	}
 
 	return err
+}
+
+func setupSsl() error {
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if !fileExist(mysql_ssl_bin) {
+		return nil
+	}
+
+	if !fileExist(mysql_ssl_server_cert) {
+
+		if _, err := exec.Command(mysql_ssl_bin, []string{
+			"--datadir=" + mysql_datadir,
+		}...).Output(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setupGrConf(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error {
+
+	if app.AppSpec().Meta.ID != "sysinner-mysql-gr" {
+		return nil
+	}
+
+	if pod.Pod.Operate.ReplicaCap < 2 ||
+		len(pod.Pod.Operate.Replicas) < pod.Pod.Operate.ReplicaCap {
+		return nil
+	}
+
+	appCfg := app.AppConfigQuery("cfg/sysinner-mysql")
+	if appCfg == nil {
+		return errors.New("No App Config (sysinner-mysql) Found")
+	}
+
+	if v, ok := appCfg.ValueOK("gr_auth"); ok {
+		cfg_next.Gr.Auth = v.String()
+	}
+	if len(cfg_next.Gr.Auth) < 20 {
+		return errors.New("invalid gr_auth value")
+	}
+
+	if v, ok := appCfg.ValueOK("gr_mode"); ok {
+		if v.String() == "multi-primary" {
+			cfg_next.Gr.MultiPrimary = true
+		} else {
+			cfg_next.Gr.MultiPrimary = false
+		}
+	} else {
+		return errors.New("invalid gr_mode value")
+	}
+
+	srvPortGen := pod.Pod.Replica.Ports.Get(3306)
+	if srvPortGen == nil {
+		return errors.New("port not found")
+	}
+
+	srvPortGr := pod.Pod.Replica.Ports.Get(3307)
+	if srvPortGr == nil {
+		return errors.New("port not found")
+	}
+
+	cfg_next.Gr.Enable = true
+
+	cfg_next.Gr.Port = int(srvPortGen.HostPort)
+	cfg_next.Gr.ServerId = int(pod.Pod.Replica.RepId + 1)
+	cfg_next.Gr.BindAddress = pod.Pod.Replica.HostAddress(pod.Pod.Meta.ID)
+	cfg_next.Gr.ReportHost = pod.Pod.Replica.HostAddress(pod.Pod.Meta.ID)
+
+	//
+	cfg_next.Gr.GroupName = idhash.HashUUID([]byte(pod.Pod.Meta.ID))
+	cfg_next.Gr.LocalAddress = fmt.Sprintf("%s:%d", cfg_next.Gr.ReportHost, srvPortGr.HostPort)
+	cfg_next.Gr.IpWhitelist = ""
+	cfg_next.Gr.GroupSeeds = ""
+
+	for i, v := range pod.Pod.Operate.Replicas {
+
+		if i >= pod.Pod.Operate.ReplicaCap {
+			break
+		}
+
+		if cfg_next.Gr.IpWhitelist != "" {
+			cfg_next.Gr.IpWhitelist += ","
+			cfg_next.Gr.GroupSeeds += ","
+		}
+
+		cfg_next.Gr.IpWhitelist += v.HostAddress(pod.Pod.Meta.ID)
+
+		srvPort := v.Ports.Get(3307)
+		if srvPort == nil {
+			return errors.New("port not found")
+		}
+
+		cfg_next.Gr.GroupSeeds += fmt.Sprintf("%s:%d", v.HostAddress(pod.Pod.Meta.ID), srvPort.HostPort)
+	}
+
+	// 10/8 prefix       (10.0.0.0 - 10.255.255.255) - Class A
+	// 172.16/12 prefix  (172.16.0.0 - 172.31.255.255) - Class B
+	// 192.168/16 prefix (192.168.0.0 - 192.168.255.255) - Class C
+	// 127.0.0.1 - localhost for IPv4
+	// cfg_next.Gr.IpWhitelist += ",192.168.38.88,192.168.3.160"
+
+	if cfg_last.GrInited && reflect.DeepEqual(cfg_last.Gr, cfg_next.Gr) {
+		return nil
+	}
+
+	//
+	sets := map[string]interface{}{
+		"server_port":             cfg_next.Gr.Port,
+		"server_server_id":        cfg_next.Gr.ServerId,
+		"server_bind_address":     cfg_next.Gr.BindAddress,
+		"server_report_host":      cfg_next.Gr.ReportHost,
+		"server_gr_group_name":    cfg_next.Gr.GroupName,
+		"server_gr_ip_whitelist":  cfg_next.Gr.IpWhitelist,
+		"server_gr_group_seeds":   cfg_next.Gr.GroupSeeds,
+		"server_gr_local_address": cfg_next.Gr.LocalAddress,
+		"server_gr_multi_primary": cfg_next.Gr.MultiPrimary,
+	}
+
+	if err := filerender.Render(mysql_gr_server_tpl, mysql_gr_server, 0644, sets); err != nil {
+		return err
+	}
+
+	hlog.Printf("info", "setup %s ok", mysql_gr_server)
+
+	return nil
+}
+
+func setupGrOpr(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error {
+
+	if app.AppSpec().Meta.ID != "sysinner-mysql-gr" {
+		return nil
+	}
+
+	if pod.Pod.Operate.ReplicaCap < 2 {
+		return nil
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	var err error
+
+	if !cfg_last.GrInited {
+
+		sql := strings.Join([]string{
+			"SET SQL_LOG_BIN=0;",
+			fmt.Sprintf(`CREATE USER IF NOT EXISTS repl@"%%" IDENTIFIED BY "%s" REQUIRE SSL;`, cfg_last.Gr.Auth),
+			// fmt.Sprintf("UPDATE USER SET password = password('%s') WHERE user = 'repl';", cfg_last.Gr.Auth),
+			`GRANT REPLICATION SLAVE ON *.* TO repl@"%";`,
+			"FLUSH PRIVILEGES;",
+			"SET SQL_LOG_BIN=1;",
+			fmt.Sprintf(`CHANGE MASTER TO MASTER_USER='repl', MASTER_PASSWORD="%s" FOR CHANNEL 'group_replication_recovery';`, cfg_last.Gr.Auth),
+		}, " ")
+
+		if err := conn_exec(sql); err != nil {
+			hlog.Printf("warn", "setup gr user err %s", err.Error())
+			return err
+		}
+		conn_close()
+
+		cfg_last.GrInited = true
+		confFlush()
+
+		hlog.Printf("info", "setup gr user ok")
+	}
+
+	if !cfg_last.GrStarted {
+
+		sql := []string{}
+
+		if pod.Pod.Replica.RepId == 0 {
+
+			sql = []string{
+				"SET GLOBAL group_replication_bootstrap_group=ON;",
+				"START GROUP_REPLICATION;",
+				"SET GLOBAL group_replication_bootstrap_group=OFF;",
+			}
+		} else {
+			time.Sleep(3e9)
+			sql = []string{
+				"START GROUP_REPLICATION;",
+			}
+		}
+
+		err = conn_exec(strings.Join(sql, " "))
+		if err != nil && !strings.Contains(err.Error(), "group is already running") {
+
+			hlog.Printf("warn", "setup gr start GROUP_REPLICATION err %s, rep %d",
+				err.Error(), pod.Pod.Replica.RepId)
+
+			if pod.Pod.Replica.RepId > 0 &&
+				(strings.Contains(err.Error(), "not configured properly to be an active member of the group") ||
+					strings.Contains(err.Error(), "transactions not present in the group")) {
+				time.Sleep(3e9)
+				sql = []string{
+					"STOP GROUP_REPLICATION;",
+					"RESET MASTER;",
+					"START GROUP_REPLICATION;",
+				}
+				err = conn_exec(strings.Join(sql, " "))
+				if err != nil {
+
+					hlog.Printf("warn", "setup gr retry start  GROUP_REPLICATION err %s, rep %d",
+						err.Error(), pod.Pod.Replica.RepId)
+
+					return err
+				}
+				hlog.Printf("warn", "setup gr RESET MASTER, rep %d",
+					pod.Pod.Replica.RepId)
+			}
+		}
+
+		hlog.Printf("info", "setup gr start GROUP_REPLICATION ok, rep %d", pod.Pod.Replica.RepId)
+
+		cfg_last.GrStarted = true
+	}
+
+	return nil
 }
 
 func clean_runlock() {
@@ -398,10 +668,6 @@ func restart() error {
 
 	mu.Lock()
 	defer mu.Unlock()
-
-	if !cfg_last.Inited {
-		return errors.New("No Init")
-	}
 
 	var err error
 
@@ -463,6 +729,9 @@ func init_root_auth() error {
 	}
 
 	root_auth := idhash.RandHexString(32)
+	if cfg_next.Gr.Enable {
+		root_auth = cfg_next.Gr.Auth
+	}
 
 	_, err := exec.Command(mysql_bin_mysqladmin,
 		"-u", "root",
@@ -471,6 +740,7 @@ func init_root_auth() error {
 	).Output()
 
 	if err != nil {
+
 		hlog.Printf("error", "init root pass err %s", err.Error())
 		if pid := pidof(); pid > 0 {
 			hlog.Printf("info", "kill %d", pid)
@@ -485,16 +755,21 @@ func init_root_auth() error {
 		if err == nil {
 
 			sql := strings.Join([]string{
+				"SET SQL_LOG_BIN=0;",
 				`FLUSH PRIVILEGES;`,
 				fmt.Sprintf(`CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY "%s";`, root_auth),
 				fmt.Sprintf(`SET PASSWORD FOR 'root'@'localhost' = PASSWORD("%s");`, root_auth),
 				`GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;`,
 				`FLUSH PRIVILEGES;`,
+				"SET SQL_LOG_BIN=1;",
 			}, " ")
-			hlog.Printf("info", "init root user")
 
 			if err = conn_exec(sql); err != nil {
 				hlog.Printf("error", "init root pass err %s", err.Error())
+			} else {
+				hlog.Printf("info", "init root user ok")
+				cfg_last.RootAuth = root_auth
+				err = confFlush()
 			}
 		} else {
 			hlog.Printf("error", "init root pass err, start skip-grant-tables error %s", err.Error())
@@ -517,11 +792,8 @@ func init_root_auth() error {
 		}
 	}
 
-	if err == nil {
-		hlog.Printf("info", "init root password ok")
-		cfg_last.RootAuth = root_auth
-		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
-	}
+	cfg_last.RootAuth = root_auth
+	err = confFlush()
 
 	return err
 }
@@ -540,14 +812,19 @@ func init_db() error {
 	if cfg_next.Database.Name != "" &&
 		cfg_last.Database.Name == "" {
 
-		if err = conn_exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", cfg_next.Database.Name)); err != nil {
+		sql := strings.Join([]string{
+			"SET SQL_LOG_BIN=0;",
+			fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s;", cfg_next.Database.Name),
+			"SET SQL_LOG_BIN=1;",
+		}, " ")
+		if err = conn_exec(sql); err != nil {
 			return err
 		}
 
 		hlog.Printf("info", "create database %s ok", cfg_next.Database.Name)
 
 		cfg_last.Database = cfg_next.Database
-		err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
+		err = confFlush()
 	}
 
 	return err
@@ -569,49 +846,72 @@ func init_user() error {
 
 		if prev := cfg_last.UserGet(v.Name); prev == nil {
 
-			conn_exec(fmt.Sprintf(`DROP USER "%s"@"%%"`, v.Name))
+			sql := strings.Join([]string{
+				"SET SQL_LOG_BIN=0;",
+				fmt.Sprintf(`DROP USER "%s"@"%%"`, v.Name),
+				fmt.Sprintf(`CREATE USER "%s"@"%%" IDENTIFIED BY "%s"`, v.Name, v.Auth),
+				fmt.Sprintf(`GRANT ALL PRIVILEGES ON %s.* TO "%s"@"%%" WITH GRANT OPTION`, cfg_last.Database.Name, v.Name),
+				"FLUSH PRIVILEGES",
+				"SET SQL_LOG_BIN=1;",
+			}, " ")
 
-			if err = conn_exec(fmt.Sprintf(
-				`CREATE USER "%s"@"%%" IDENTIFIED BY "%s"`,
-				v.Name, v.Auth,
-			)); err != nil {
-				return err
-			}
-
-			if err = conn_exec(fmt.Sprintf(
-				`GRANT ALL PRIVILEGES ON %s.* TO "%s"@"%%" WITH GRANT OPTION`,
-				cfg_last.Database.Name, v.Name,
-			)); err != nil {
-				return err
-			}
-
-			if err = conn_exec("FLUSH PRIVILEGES"); err != nil {
+			if err = conn_exec(sql); err != nil {
 				return err
 			}
 
 			hlog.Printf("info", "create user %s", v.Name)
 
 			cfg_last.UserSync(v)
-			err = json.EncodeToFile(cfg_last, mysql_conf_init, "  ")
+			err = confFlush()
 		}
 	}
 
 	return err
 }
 
+var (
+	dbOpr mysql.Conn
+)
+
 func conn_exec(sql string) error {
 
-	db := mysql.New("unix", "", mysql_sock, "root", cfg_last.RootAuth)
+	var err error
 
-	err := db.Connect()
-	if err != nil {
-		hlog.Printf("info", "conn err %s", err.Error())
-		return err
+	for i := 0; i < 3; i++ {
+
+		if dbOpr == nil {
+			db := mysql.New("unix", "", mysql_sock, "root", cfg_last.RootAuth)
+			if err = db.Connect(); err != nil {
+				hlog.Printf("info", "conn err %s", err.Error())
+				return err
+			}
+			dbOpr = db
+		}
+
+		// _, _, err = dbOpr.Query("SET SQL_LOG_BIN=0;")
+		if err == nil {
+			_, _, err = dbOpr.Query(sql)
+			if err == nil {
+				return nil
+			}
+		}
+
+		dbOpr.Close()
+		dbOpr = nil
+
+		time.Sleep(3e9)
 	}
 
-	defer db.Close()
-
-	_, _, err = db.Query(sql)
-
 	return err
+}
+
+func conn_close() {
+	if dbOpr != nil {
+		dbOpr.Close()
+		dbOpr = nil
+	}
+}
+
+func confFlush() error {
+	return json.EncodeToFile(cfg_last, mysql_cnf_init, "  ")
 }

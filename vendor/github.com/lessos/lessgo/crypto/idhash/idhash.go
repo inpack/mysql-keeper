@@ -17,12 +17,17 @@ package idhash
 import (
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/sha1"
+	"crypto/sha256"
 	mrand "math/rand"
 	"time"
 )
 
 const (
 	rand_bytes_max = 1024 * 1024
+	AlgMd5         = 1
+	AlgSha1        = 2
+	AlgSha256      = 3
 )
 
 func init() {
@@ -58,14 +63,41 @@ func Rand(size int) []byte {
 }
 
 func Hash(bs []byte, bytelen int) []byte {
+	return HashSum(AlgMd5, bs, bytelen)
+}
+
+func HashSum(alg int, bs []byte, bytelen int) []byte {
+
+	if len(bs) == 0 {
+		return bs
+	}
 
 	if bytelen < 1 {
 		bytelen = 1
-	} else if bytelen > 16 {
-		bytelen = 16
 	}
 
-	bs_hash := md5.Sum(bs)
+	switch alg {
+	case AlgMd5:
+		if bytelen > 16 {
+			bytelen = 16
+		}
+		hs := md5.Sum(bs)
+		return hs[:bytelen]
 
-	return bs_hash[:bytelen]
+	case AlgSha256:
+		if bytelen > 32 {
+			bytelen = 32
+		}
+		hs := sha256.Sum256(bs)
+		return hs[:bytelen]
+
+	case AlgSha1:
+		if bytelen > 20 {
+			bytelen = 20
+		}
+		hs := sha1.Sum(bs)
+		return hs[:bytelen]
+	}
+
+	return []byte{}
 }

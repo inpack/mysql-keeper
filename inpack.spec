@@ -15,3 +15,4 @@ go build -ldflags "-w -s" -o {{.buildroot}}/bin/mysql-keeper main.go
 
 
 %files
+misc/
