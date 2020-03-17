@@ -254,7 +254,7 @@ func do() {
 	cfg_last.Gr = cfg_next.Gr
 	confFlush()
 
-	hlog.Printf("info", "setup in %v", time.Since(tstart))
+	hlog.Printf("debug", "setup in %v", time.Since(tstart))
 
 	myPodCfr = podCfr
 }
@@ -634,8 +634,6 @@ func start() error {
 
 	mu.Lock()
 	defer mu.Unlock()
-
-	hlog.Printf("info", "start()")
 
 	if !cfg_last.Inited {
 		return errors.New("No Init")

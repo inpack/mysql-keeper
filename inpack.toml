@@ -1,0 +1,16 @@
+[project]
+name = "mysql-keeper"
+version = "0.10.1"
+vendor = "sysinner.com"
+homepage = "http://www.sysinner.com"
+description = "configuration management tool for mysql"
+groups = ["dev/db"]
+
+[files]
+allow = "misc/"
+
+[scripts]
+build = """PREFIX=\"{{.project__prefix}}\"
+mkdir -p {{.buildroot}}/{bin,log}
+go build -ldflags \"-w -s\" -o {{.buildroot}}/bin/mysql-keeper main.go
+"""
