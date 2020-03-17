@@ -430,7 +430,7 @@ func setupGrConf(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error
 	}
 
 	if pod.Pod.Operate.ReplicaCap < 2 ||
-		len(pod.Pod.Operate.Replicas) < pod.Pod.Operate.ReplicaCap {
+		len(pod.Pod.Operate.Replicas) < int(pod.Pod.Operate.ReplicaCap) {
 		return nil
 	}
 
@@ -481,7 +481,7 @@ func setupGrConf(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error
 
 	for i, v := range pod.Pod.Operate.Replicas {
 
-		if i >= pod.Pod.Operate.ReplicaCap {
+		if i >= int(pod.Pod.Operate.ReplicaCap) {
 			break
 		}
 
