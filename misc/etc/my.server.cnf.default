@@ -2,6 +2,7 @@
 # Host RAM {{.env_ram_size}}
 
 [mysqld]
+
 skip-external-locking           = 1
 #skip-name-resolve
 #skip-host-cache

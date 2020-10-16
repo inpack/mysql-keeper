@@ -2,6 +2,14 @@
 # http://dev.mysql.com/doc/refman/5.7/en/server-configuration-defaults.html
 
 [mysqld]
+
+bind-address = 0.0.0.0
+port = 3306
+ssl = 0
+
+sql_mode="IGNORE_SPACE,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION"
+
+
 datadir                         = {{.project_prefix}}/data
 socket                          = {{.project_prefix}}/run/mysql.sock
 secure-file-priv                = {{.project_prefix}}/files

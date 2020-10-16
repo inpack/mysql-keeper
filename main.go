@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hooto/hflag4g/hflag"
 	"github.com/hooto/hlog4g/hlog"
 	"github.com/lessos/lessgo/crypto/idhash"
 	"github.com/lessos/lessgo/encoding/json"
@@ -36,8 +37,8 @@ import (
 )
 
 var (
+	mysql_sv              = "57"
 	mysql_prefix          = "/opt/mysql/mysql57"
-	mysql_keeper_prefix   = "/opt/mysql/keeper"
 	mysql_datadir         = mysql_prefix + "/data"
 	mysql_bin_mysql       = mysql_prefix + "/bin/mysql57"
 	mysql_bin_mysqld      = mysql_prefix + "/bin/mysql57d"
@@ -55,6 +56,7 @@ var (
 	mysql_gr_server       = mysql_prefix + "/etc/my.cnf.d/server.gr.cnf"
 	mysql_gr_server_tpl   = mysql_keeper_prefix + "/misc/5.7/server.gr.cnf.default"
 	mysql_mem_min         = int32(16) // in MiB
+	mysql_keeper_prefix   = "/opt/mysql/keeper"
 	mu                    sync.Mutex
 	cfg_mu                sync.Mutex
 	cfg_last              EnvConfig
@@ -136,6 +138,18 @@ func (cfg *EnvConfig) UserGet(name string) *EnvConfigUser {
 
 func main() {
 
+	if v, ok := hflag.ValueOK("sv"); ok {
+		switch v.String() {
+		case "56", "57":
+			mysql_sv = v.String()
+
+			mysql_prefix = "/opt/mysql/mysql" + mysql_sv
+			mysql_bin_mysql = mysql_prefix + "/bin/mysql" + mysql_sv
+			mysql_bin_mysqld = mysql_prefix + "/bin/mysql" + mysql_sv + "d"
+			mysql_bin_mysqladmin = mysql_prefix + "/bin/mysql" + mysql_sv + "admin"
+		}
+	}
+
 	for {
 		time.Sleep(3e9)
 		do()
@@ -153,6 +167,7 @@ func do() {
 		tstart = time.Now()
 		podCfr *inconf.PodConfigurator
 		appCfr *inconf.AppConfigurator
+		appCfg *inconf.AppConfigGroup
 		err    error
 	)
 	cfg_next = EnvConfig{}
@@ -177,8 +192,16 @@ func do() {
 		}
 
 		appCfr = podCfr.AppConfigurator("sysinner-mysql-*")
-		if appCfr == nil {
-			hlog.Print("error", "No AppSpec (sysinner-mysql) Found")
+		if appCfr != nil {
+			appCfg = appCfr.AppConfigQuery("cfg/sysinner-mysql")
+		}
+
+		if appCfg == nil {
+			appCfg = podCfr.AppConfigQuery("cfg/sysinner-mysql")
+		}
+
+		if appCfg == nil {
+			hlog.Print("error", "No AppSpec (sysinner-mysql-*) or AppOption (cfg/sysinner-mysql) Found")
 			return
 		}
 	}
@@ -189,12 +212,12 @@ func do() {
 	}
 
 	//
-	if err := setupConf(podCfr, appCfr); err != nil {
+	if err := setupConf(podCfr, appCfg); err != nil {
 		hlog.Print("error", err.Error())
 		return
 	}
 
-	if err := setupGrConf(podCfr, appCfr); err != nil {
+	if err := setupGrConf(podCfr); err != nil {
 		hlog.Printf("error", "setup gr err %s", err.Error())
 		return
 	}
@@ -245,7 +268,7 @@ func do() {
 		return
 	}
 
-	if err := setupGrOpr(podCfr, appCfr); err != nil {
+	if err := setupGrOpr(podCfr); err != nil {
 		hlog.Printf("error", "setup gr err %s", err.Error())
 		return
 	}
@@ -259,12 +282,7 @@ func do() {
 	myPodCfr = podCfr
 }
 
-func setupConf(podCfr *inconf.PodConfigurator, appCfr *inconf.AppConfigurator) error {
-
-	appCfg := appCfr.AppConfigQuery("cfg/sysinner-mysql")
-	if appCfg == nil {
-		return errors.New("No App Config (sysinner-mysql) Found")
-	}
+func setupConf(podCfr *inconf.PodConfigurator, appCfg *inconf.AppConfigGroup) error {
 
 	if podCfr.PodSpec().Box.Resources.MemLimit > 0 {
 		cfg_next.Resource.Ram = podCfr.PodSpec().Box.Resources.MemLimit
@@ -423,20 +441,25 @@ func setupSsl() error {
 	return nil
 }
 
-func setupGrConf(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error {
-
-	if app.AppSpec().Meta.ID != "sysinner-mysql-gr" {
-		return nil
-	}
+func setupGrConf(pod *inconf.PodConfigurator) error {
 
 	if pod.Pod.Operate.ReplicaCap < 2 ||
 		len(pod.Pod.Operate.Replicas) < int(pod.Pod.Operate.ReplicaCap) {
 		return nil
 	}
 
+	app := pod.AppConfigurator("sysinner-mysql-gr")
+	if app == nil {
+		return nil // errors.New("No App Config (sysinner-mysql-*) Found")
+	}
+
+	if app.AppSpec().Meta.ID != "sysinner-mysql-gr" {
+		return nil
+	}
+
 	appCfg := app.AppConfigQuery("cfg/sysinner-mysql")
 	if appCfg == nil {
-		return errors.New("No App Config (sysinner-mysql) Found")
+		return errors.New("No App Config (sysinner-mysql-*) Found")
 	}
 
 	if v, ok := appCfg.ValueOK("gr_auth"); ok {
@@ -532,13 +555,18 @@ func setupGrConf(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error
 	return nil
 }
 
-func setupGrOpr(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error {
+func setupGrOpr(pod *inconf.PodConfigurator) error {
 
-	if app.AppSpec().Meta.ID != "sysinner-mysql-gr" {
+	if pod.Pod.Operate.ReplicaCap < 2 {
 		return nil
 	}
 
-	if pod.Pod.Operate.ReplicaCap < 2 {
+	app := pod.AppConfigurator("sysinner-mysql-gr")
+	if app == nil {
+		return nil
+	}
+
+	if app.AppSpec().Meta.ID != "sysinner-mysql-gr" {
 		return nil
 	}
 
@@ -551,9 +579,9 @@ func setupGrOpr(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error 
 
 		sql := strings.Join([]string{
 			"SET SQL_LOG_BIN=0;",
-			fmt.Sprintf(`CREATE USER IF NOT EXISTS repl@"%%" IDENTIFIED BY "%s" REQUIRE SSL;`, cfg_last.Gr.Auth),
+			fmt.Sprintf(`CREATE USER IF NOT EXISTS repl@'%%' IDENTIFIED BY '%s' REQUIRE SSL;`, cfg_last.Gr.Auth),
 			// fmt.Sprintf("UPDATE USER SET password = password('%s') WHERE user = 'repl';", cfg_last.Gr.Auth),
-			`GRANT REPLICATION SLAVE ON *.* TO repl@"%";`,
+			`GRANT REPLICATION SLAVE ON *.* TO repl@'%';`,
 			"FLUSH PRIVILEGES;",
 			"SET SQL_LOG_BIN=1;",
 			fmt.Sprintf(`CHANGE MASTER TO MASTER_USER='repl', MASTER_PASSWORD="%s" FOR CHANNEL 'group_replication_recovery';`, cfg_last.Gr.Auth),
@@ -563,6 +591,7 @@ func setupGrOpr(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error 
 			hlog.Printf("warn", "setup gr user err %s", err.Error())
 			return err
 		}
+		hlog.Printf("info", "sql/exec %s", sql)
 		conn_close()
 
 		cfg_last.GrInited = true
@@ -611,10 +640,14 @@ func setupGrOpr(pod *inconf.PodConfigurator, app *inconf.AppConfigurator) error 
 						err.Error(), pod.Pod.Replica.RepId)
 
 					return err
+				} else {
+					hlog.Printf("info", "sql/exec %s", sql)
 				}
 				hlog.Printf("warn", "setup gr RESET MASTER, rep %d",
 					pod.Pod.Replica.RepId)
 			}
+		} else {
+			hlog.Printf("info", "sql/exec %s", sql)
 		}
 
 		hlog.Printf("info", "setup gr start GROUP_REPLICATION ok, rep %d", pod.Pod.Replica.RepId)
@@ -716,8 +749,6 @@ func init_root_auth() error {
 	mu.Lock()
 	defer mu.Unlock()
 
-	hlog.Printf("info", "init_root_auth()")
-
 	if !cfg_last.Inited {
 		return errors.New("No Init")
 	}
@@ -755,8 +786,8 @@ func init_root_auth() error {
 			sql := strings.Join([]string{
 				"SET SQL_LOG_BIN=0;",
 				`FLUSH PRIVILEGES;`,
-				fmt.Sprintf(`CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY "%s";`, root_auth),
-				fmt.Sprintf(`SET PASSWORD FOR 'root'@'localhost' = PASSWORD("%s");`, root_auth),
+				fmt.Sprintf(`CREATE USER IF NOT EXISTS 'root'@'localhost' IDENTIFIED BY '%s';`, root_auth),
+				fmt.Sprintf(`SET PASSWORD FOR 'root'@'localhost' = PASSWORD('%s');`, root_auth),
 				`GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' WITH GRANT OPTION;`,
 				`FLUSH PRIVILEGES;`,
 				"SET SQL_LOG_BIN=1;",
@@ -765,7 +796,7 @@ func init_root_auth() error {
 			if err = conn_exec(sql); err != nil {
 				hlog.Printf("error", "init root pass err %s", err.Error())
 			} else {
-				hlog.Printf("info", "init root user ok")
+				hlog.Printf("info", "init root user ok, sql %s", sql)
 				cfg_last.RootAuth = root_auth
 				err = confFlush()
 			}
@@ -789,6 +820,8 @@ func init_root_auth() error {
 			time.Sleep(1e9)
 		}
 	}
+
+	hlog.Printf("info", "init_root_auth ok")
 
 	cfg_last.RootAuth = root_auth
 	err = confFlush()
@@ -819,7 +852,7 @@ func init_db() error {
 			return err
 		}
 
-		hlog.Printf("info", "create database %s ok", cfg_next.Database.Name)
+		hlog.Printf("info", "create database %s ok, sql %s", cfg_next.Database.Name, sql)
 
 		cfg_last.Database = cfg_next.Database
 		err = confFlush()
@@ -846,10 +879,10 @@ func init_user() error {
 
 			sql := strings.Join([]string{
 				"SET SQL_LOG_BIN=0;",
-				fmt.Sprintf(`DROP USER "%s"@"%%"`, v.Name),
-				fmt.Sprintf(`CREATE USER "%s"@"%%" IDENTIFIED BY "%s"`, v.Name, v.Auth),
-				fmt.Sprintf(`GRANT ALL PRIVILEGES ON %s.* TO "%s"@"%%" WITH GRANT OPTION`, cfg_last.Database.Name, v.Name),
-				"FLUSH PRIVILEGES",
+				fmt.Sprintf(`DROP USER IF EXISTS '%s'@'%%';`, v.Name),
+				fmt.Sprintf(`CREATE USER '%s'@'%%' IDENTIFIED BY '%s';`, v.Name, v.Auth),
+				fmt.Sprintf(`GRANT ALL PRIVILEGES ON %s.* TO '%s'@'%%' WITH GRANT OPTION;`, cfg_last.Database.Name, v.Name),
+				"FLUSH PRIVILEGES;",
 				"SET SQL_LOG_BIN=1;",
 			}, " ")
 
@@ -857,7 +890,7 @@ func init_user() error {
 				return err
 			}
 
-			hlog.Printf("info", "create user %s", v.Name)
+			hlog.Printf("info", "create user %s ok, sql %s", v.Name, sql)
 
 			cfg_last.UserSync(v)
 			err = confFlush()
